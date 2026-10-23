@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frame Window List</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #eef1f6; --surface: #ffffff; --ink: #14182b; --muted: #5d6580;
+    --line: #d5dae6; --accent: #d6246e; --bar: #14182b;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1324; --surface: #181d34; --ink: #eef0fa; --muted: #98a0c0;
+      --line: #2b3254; --accent: #ff5c9a; --bar: #eef0fa;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); }
+  body {
+    margin: 0; color: var(--ink); background: var(--bg);
+    font: 400 16px/1.55 Inter, system-ui, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 56px 20px 80px; }
+  h1 {
+    font: 800 clamp(2.2rem, 7vw, 3.6rem)/1.02 "Bricolage Grotesque", system-ui, sans-serif;
+    letter-spacing: -0.03em; margin: 0 0 14px;
+  }
+  .lede { color: var(--muted); max-width: 56ch; margin: 0 0 36px; }
+  .list { display: grid; gap: 10px; padding: 0; margin: 0; list-style: none; }
+  .row {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden;
+  }
+  .row button {
+    all: unset; box-sizing: border-box; width: 100%; cursor: pointer;
+    display: grid; grid-template-columns: 44px 1fr auto; gap: 14px; align-items: center;
+    padding: 14px 16px;
+  }
+  .row button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .rank { font: 800 1.6rem/1 "Bricolage Grotesque", sans-serif; color: var(--accent); }
+  .name { font: 700 1.1rem/1.2 "Bricolage Grotesque", sans-serif; }
+  .sub { color: var(--muted); font-size: 0.85rem; }
+  .score { text-align: right; font: 700 1.3rem/1 "Bricolage Grotesque", sans-serif; }
+  .score small { display: block; font: 400 0.75rem/1.3 Inter, sans-serif; color: var(--muted); }
+  /* the strip: one bar per click, taller bar = wider (easier) window */
+  .strip { display: flex; align-items: flex-end; gap: 2px; height: 26px; margin-top: 8px; }
+  .strip i { flex: 1; max-width: 10px; background: var(--bar); border-radius: 1px; opacity: .85; }
+  .strip i.tight { background: var(--accent); opacity: 1; }
+  .detail { display: none; padding: 0 16px 16px 74px; font-size: 0.9rem; color: var(--muted); }
+  .row.open .detail { display: block; }
+  .detail code { color: var(--ink); word-break: break-word; }
+  .detail p { margin: 0 0 6px; }
+  details { margin-top: 44px; border-top: 1px solid var(--line); padding-top: 18px; }
+  summary { cursor: pointer; font-weight: 500; }
+  details p, details li { color: var(--muted); max-width: 62ch; }
+  .empty { padding: 30px; text-align: center; color: var(--muted); }
+  @media (max-width: 520px) { .detail { padding-left: 16px; } .row button { grid-template-columns: 34px 1fr auto; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Frame Window List</h1>
+  <p class="lede">Levels are ranked by how consistent a player must be to clear them, calculated from the frame window of every click. No votes, no opinions: add a level's windows and the formula places it.</p>
+
+  <ol class="list" id="list"></ol>
+
+  <details>
+    <summary>How placement works</summary>
+    <p>Each click or release has a window: the number of frames, at 240 fps, in which it can be hit. Smaller windows are harder.</p>
+    <p>We model a player with a timing consistency of σ milliseconds, then find the σ at which that player clears the whole level about <strong id="ptarget"></strong> of the time. The smaller that σ is, the more consistent the player must be, so the harder the level.</p>
+    <p>The score is 100 ÷ σ. Higher means harder. The range shown under each score is what you get if every window is off by one frame, so levels with overlapping ranges are effectively close.</p>
+    <p>Because every extra click is another chance to fail, longer levels score higher automatically, and easy filler clicks barely change anything.</p>
+  </details>
+</main>
+
+<script src="levels.js"></script>
+<script>
+  // ---- the formula ----------------------------------------------------
+  const P_TARGET = 1 / 1000;   // chance of clearing the level in one attempt
+  const FPS = 240;
+
+  // error function (series for small x, Abramowitz-Stegun for large x)
+  function erf(x) {
+    if (x < 0) return -erf(-x);
+    if (x < 2.5) {
+      let term = x, sum = x;
+      for (let n = 1; n < 60; n++) {
+        term *= -x * x / n;
+        sum += term / (2 * n + 1);
+      }
+      return 2 / Math.sqrt(Math.PI) * sum;
+    }
+    const t = 1 / (1 + 0.3275911 * x);
+    const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+    return y;
+  }
+
+  // sigma (ms) at which a player clears the whole level with chance P_TARGET
+  function sigmaFor(windowsFrames) {
+    const ws = windowsFrames.map(f => f * 1000 / FPS);
+    const logClear = s => ws.reduce((a, w) => a + Math.log(erf(w / (2 * Math.SQRT2 * s))), 0);
+    let lo = 0.001, hi = 1e7;
+    for (let i = 0; i < 200; i++) {
+      const mid = Math.sqrt(lo * hi);
+      if (logClear(mid) > Math.log(P_TARGET)) lo = mid; else hi = mid;
+    }
+    return Math.sqrt(lo * hi);
+  }
+
+  const score = ws => 100 / sigmaFor(ws);
+
+  // ---- page -----------------------------------------------------------
+  document.getElementById("ptarget").textContent = "1 in " + Math.round(1 / P_TARGET).toLocaleString();
+
+  const ranked = LEVELS.map(l => ({
+    ...l,
+    score: score(l.windows),
+    low: score(l.windows.map(w => w + 1)),               // looser windows = easier
+    high: score(l.windows.map(w => Math.max(1, w - 1)))  // tighter windows = harder
+  })).sort((a, b) => b.score - a.score);
+
+  const list = document.getElementById("list");
+  if (!ranked.length) {
+    list.innerHTML = '<li class="empty">No levels yet. Add one in levels.js.</li>';
+  }
+
+  ranked.forEach((l, i) => {
+    const max = Math.max(...l.windows);
+    const bars = l.windows.map(w =>
+      `<i class="${w <= 1 ? "tight" : ""}" style="height:${Math.max(12, w / max * 100)}%" title="${w} frame${w === 1 ? "" : "s"}"></i>`
+    ).join("");
+    const li = document.createElement("li");
+    li.className = "row";
+    li.innerHTML = `
+      <button aria-expanded="false">
+        <span class="rank">${i + 1}</span>
+        <span>
+          <span class="name">${l.name}</span><br>
+          <span class="sub">${l.windows.length} timings, tightest window ${Math.min(...l.windows)} frame${Math.min(...l.windows) === 1 ? "" : "s"}</span>
+          <div class="strip" aria-hidden="true">${bars}</div>
+        </span>
+        <span class="score">${l.score.toFixed(1)}<small>${l.low.toFixed(1)} to ${l.high.toFixed(1)}</small></span>
+      </button>
+      <div class="detail">
+        <p>Level ID: <code>${l.id ?? "n/a"}</code></p>
+        <p>Frame windows in order: <code>${l.windows.join(", ")}</code></p>
+      </div>`;
+    const btn = li.querySelector("button");
+    btn.addEventListener("click", () => {
+      const open = li.classList.toggle("open");
+      btn.setAttribute("aria-expanded", open);
+    });
+    list.appendChild(li);
+  });
+</script>
+</body>
+</html>
